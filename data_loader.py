@@ -44,6 +44,7 @@ def load_csv(file_path):
     for row in raw_rows:
         #remove leading/trailing whitespace from keys and values
         country_name = row.get('Country Name', '').strip()
+        country_code = row.get('Country Code', '').strip()
         continent = row.get('Continent', '').strip()
         
         #get all year columns 
@@ -55,6 +56,7 @@ def load_csv(file_path):
             if value:
                 transformed.append({
                     "Country Name": country_name,
+                    "Country Code": country_code,
                     "Region": continent,  # Use Continent as Region
                     "Year": yearcol,
                     "Value": value,
@@ -84,6 +86,7 @@ def clean_data(raw_rows):
     parsed_rows = list(
         map(lambda row: {
             "Country Name": row.get("Country Name", ""),
+            "Country Code": row.get("Country Code", ""),
             "Region": row.get("Region", ""),
             "Year": _parse_year(row.get("Year", "")),
             "Value": _parse_gdp(row.get("Value", "")),
@@ -93,6 +96,7 @@ def clean_data(raw_rows):
     cleaned = list(
         filter(lambda row: 
                row["Country Name"] and 
+               row["Country Code"] and 
                row["Region"] and 
                row["Year"] is not None and 
                row["Value"] is not None, 
