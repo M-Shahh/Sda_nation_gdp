@@ -1,0 +1,173 @@
+@startuml Phase3_Class_Diagram
+
+skinparam backgroundColor #F0F4F8
+skinparam classBackgroundColor #FFFFFF
+skinparam classBorderColor #2E86AB
+skinparam classHeaderBackgroundColor #2E86AB
+skinparam classFontColor #FFFFFF
+skinparam arrowColor #C73E1D
+skinparam arrowThickness 2
+skinparam packageBackgroundColor #EBF8FF
+skinparam packageBorderColor #2E86AB
+skinparam interfaceBackgroundColor #FFF8E1
+skinparam interfaceBorderColor #F18F01
+
+title Phase 3 — Generic Concurrent Pipeline\nClass Diagram
+
+' ─────────────────────────────────────────────
+' CORE PACKAGE (owns all contracts)
+' ─────────────────────────────────────────────
+package "core  (Domain — Owns All Contracts)" <<Rectangle>> {
+
+    interface DataSink <<Protocol>> {
+        + write(records: List[dict]) : None
+    }
+
+    interface PipelineService <<Protocol>> {
+        + execute(raw_data: List[Any]) : None
+    }
+
+    interface TelemetryObserver <<Protocol>> {
+        + on_telemetry_update(data: dict) : None
+    }
+
+    class PipelineTelemetry <<Subject>> {
+        - _raw_queue : Queue
+        - _intermediate_queue : Queue
+        - _processed_queue : Queue
+        - _max_size : int
+        - _observers : List
+        + total_received : int
+        + total_verified : int
+        + total_dropped : int
+        --
+        + subscribe(observer) : None
+        + unsubscribe(observer) : None
+        + poll_and_notify() : None
+        - _safe_qsize(queue) : int
+    }
+
+    class "engine.py" as Engine <<Functional Core>> {
+        + verify_signature(packet, key, iterations) : bool
+        + sliding_window_average(window: list) : float
+        + core_worker_process(raw_q, inter_q, key, iter, id) : None
+        + aggregator_process(inter_q, proc_q, window, n) : None
+    }
+
+    PipelineTelemetry --> TelemetryObserver : notifies
+}
+
+' ─────────────────────────────────────────────
+' PLUGINS PACKAGE
+' ─────────────────────────────────────────────
+package "plugins  (Inputs & Outputs)" <<Rectangle>> {
+
+    class CSVProducer <<Producer>> {
+        - dataset_path : str
+        - schema_columns : list
+        - delay : float
+        - num_workers : int
+        --
+        + __init__(config: dict)
+        + run(raw_queue: Queue) : None
+    }
+
+    class RealtimeDashboard <<Observer>> {
+        - config : dict
+        - _x_vals : deque
+        - _y_vals : deque
+        - _y_avg  : deque
+        - _telemetry : dict
+        - MAX_DISPLAY_POINTS : int
+        --
+        + __init__(config: dict)
+        + on_telemetry_update(data: dict) : None
+        + run(processed_queue, telemetry) : None
+        - _animate(frame) : None
+        - _draw_telemetry_bars() : None
+        - _draw_line_charts() : None
+        - _build_layout() : None
+    }
+
+    CSVProducer   ..> PipelineService  : puts to raw_queue
+    RealtimeDashboard ..|> TelemetryObserver : implements
+}
+
+' ─────────────────────────────────────────────
+' MAIN
+' ─────────────────────────────────────────────
+class main <<Orchestrator>> {
+    + bootstrap() : None
+    + load_config(path: str) : dict
+}
+
+class "config.json" <<Configuration>> {
+    dataset_path : str
+    pipeline_dynamics : dict
+    schema_mapping : dict
+    processing : dict
+    visualizations : dict
+}
+
+' ─────────────────────────────────────────────
+' QUEUES (Shared Memory between Processes)
+' ─────────────────────────────────────────────
+class "raw_queue" as RQ <<multiprocessing.Queue>> {
+    maxsize = stream_queue_max_size
+}
+
+class "intermediate_queue" as IQ <<multiprocessing.Queue>> {
+    maxsize = stream_queue_max_size
+}
+
+class "processed_queue" as PQ <<multiprocessing.Queue>> {
+    maxsize = stream_queue_max_size
+}
+
+' ─────────────────────────────────────────────
+' RELATIONSHIPS
+' ─────────────────────────────────────────────
+main --> "config.json" : reads
+main --> CSVProducer   : instantiates + starts Process
+main --> Engine        : starts N CoreWorker Processes
+main --> Engine        : starts Aggregator Process
+main --> PipelineTelemetry : instantiates + passes queues
+main --> RealtimeDashboard : instantiates + runs in main thread
+
+CSVProducer --> RQ : puts packets
+Engine --> RQ       : CoreWorker gets from
+Engine --> IQ       : CoreWorker puts verified
+Engine --> IQ       : Aggregator gets from
+Engine --> PQ       : Aggregator puts enriched
+
+PipelineTelemetry --> RQ : polls qsize()
+PipelineTelemetry --> IQ : polls qsize()
+PipelineTelemetry --> PQ : polls qsize()
+
+RealtimeDashboard --> PQ : drains packets
+
+note right of Engine
+  Functional Core, Imperative Shell:
+  - verify_signature() = pure function
+  - sliding_window_average() = pure function
+  - Aggregator shell holds mutable deque
+end note
+
+note right of PipelineTelemetry
+  Observer Pattern:
+  Subject = PipelineTelemetry
+  Observer = RealtimeDashboard
+  Contract = TelemetryObserver Protocol
+end note
+
+note bottom of main
+  Dependency Injection order:
+  1. raw_q, inter_q, proc_q = Queue(maxsize)
+  2. telemetry = PipelineTelemetry(queues)
+  3. dashboard = RealtimeDashboard(config)
+  4. telemetry.subscribe(dashboard)
+  5. Start Input, Core, Aggregator processes
+  6. dashboard.run() in main thread
+end note
+
+@enduml

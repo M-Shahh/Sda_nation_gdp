@@ -1,0 +1,112 @@
+@startuml Phase3_Sequence_Diagram
+
+skinparam backgroundColor #F0F4F8
+skinparam sequenceArrowColor #C73E1D
+skinparam sequenceArrowThickness 2
+skinparam participantBackgroundColor #FFFFFF
+skinparam participantBorderColor #2E86AB
+skinparam participantFontColor #1A202C
+skinparam noteBackgroundColor #FFF8E1
+skinparam noteBorderColor #F18F01
+skinparam activationBorderColor #2E86AB
+skinparam sequenceLifeLineBorderColor #4A5568
+
+title Phase 3 — Concurrent Pipeline Sequence Diagram
+
+actor "main.py\n(Orchestrator)" as Main
+participant "CSVProducer\n(Process 1)" as Input
+participant "raw_queue\n(bounded)" as RQ
+participant "CoreWorker x N\n(Processes 2..N+1)" as Core
+participant "intermediate_queue\n(bounded)" as IQ
+participant "Aggregator\n(Process N+2)" as Agg
+participant "processed_queue\n(bounded)" as PQ
+participant "PipelineTelemetry\n(Subject)" as Tel
+participant "RealtimeDashboard\n(Observer + Main Thread)" as Dash
+
+== Bootstrap & Wiring ==
+
+Main -> RQ  : Queue(maxsize=50)
+Main -> IQ  : Queue(maxsize=50)
+Main -> PQ  : Queue(maxsize=50)
+Main -> Tel : PipelineTelemetry(RQ, IQ, PQ, 50)
+Main -> Dash : RealtimeDashboard(config)
+Main -> Tel : subscribe(dashboard)
+Main -> Input : Process(target=producer.run).start()
+Main -> Core  : Process(target=core_worker) x N .start()
+Main -> Agg   : Process(target=aggregator).start()
+Main -> Dash  : run(PQ, telemetry)   [blocks - main thread]
+
+== Data Flow (Concurrent) ==
+
+loop For each CSV row
+    Input -> RQ : put(packet)\n[blocks if full = BACKPRESSURE]
+    note right of RQ
+      If queue fills up,
+      put() blocks automatically.
+      This is natural backpressure.
+    end note
+end
+
+loop N CoreWorkers in parallel (SCATTER)
+    Core -> RQ  : get(packet)  [blocks until available]
+    note right of Core
+      FUNCTIONAL CORE:
+      verify_signature(packet, key, iterations)
+      PBKDF2-HMAC-SHA256 (100k iterations)
+      CPU-intensive — benefits from N parallel workers
+    end note
+    alt Signature valid
+        Core -> IQ : put(verified_packet)
+    else Signature invalid
+        Core -> Core : drop packet (silent)
+    end
+end
+
+loop Aggregator (GATHER — single process)
+    Agg -> IQ : get(verified_packet)
+    note right of Agg
+      IMPERATIVE SHELL:
+      window.append(metric_value)
+
+      FUNCTIONAL CORE:
+      avg = sliding_window_average(list(window))
+    end note
+    Agg -> Agg : window.append(metric_value)
+    Agg -> Agg : avg = sliding_window_average(window)
+    Agg -> PQ  : put(enriched_packet + computed_metric)
+end
+
+== Sentinel Propagation (End of Data) ==
+
+Input -> RQ : put(None) x N   [one per worker]
+Core  -> IQ : put(None)       [each worker on receiving None]
+Agg   -> PQ : put(None)       [after all N worker sentinels received]
+
+== Real-Time Dashboard (100ms tick) ==
+
+loop Every 100ms (FuncAnimation)
+    Dash -> Tel : poll_and_notify()
+    Tel  -> RQ  : qsize()
+    Tel  -> IQ  : qsize()
+    Tel  -> PQ  : qsize()
+    Tel  -> Dash : on_telemetry_update({raw:X, inter:Y, proc:Z})
+    note right of Dash
+      Observer Pattern:
+      Subject notifies Observer
+      Dashboard updates colour bars:
+      Green  < 50% fill
+      Yellow 50-79% fill
+      Red    >= 80% fill (BACKPRESSURE)
+    end note
+    Dash -> PQ  : get_nowait() [drain up to 10 packets]
+    Dash -> Dash : update line charts
+    Dash -> Dash : redraw telemetry bars
+end
+
+== Shutdown ==
+Dash -> Main : window closed
+Main -> Input : terminate()
+Main -> Core  : terminate() x N
+Main -> Agg   : terminate()
+
+@enduml
